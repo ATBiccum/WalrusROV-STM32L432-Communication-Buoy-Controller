@@ -11,12 +11,12 @@
  * Control Station nRF Pins for STM32F407:
  * GND = GND = 1
  * VCC = 3.3V = 2
- * MOSI = PC_12 = 6 
- * MISO = PC_11 = 7 
- * SCK = PC_10 = 5 
- * CSN = PC_9 = 4
- * CE = PC_8 = 3
- * IRQ = PC_7 = 8
+ * MOSI = PA_7 = 6 
+ * MISO = PA_6 = 7 
+ * SCK = PA_5 = 5 
+ * CSN = PB_0 = 4
+ * CE = PA_1 = 3
+ * IRQ = PA_0 = 8
  *
  * Com Buoy nRF Pins for STM32L432:
  * GND = GND = 1
@@ -32,7 +32,9 @@
  *  1  4   7  10   13  16  19 20 21 22 23 24 25 28
  * "# 000 000 000 000 000 000 0  0  0  0  0  0  000" = 28
  * Pound, L1, L2, LeftHatX, LefthatY, RightHatX, RightHatY, R1, R2, Triangle, Circle, Cross, Square, Checksum
- *
+ * https://www.st.com/resource/en/user_manual/dm00231744-stm32-nucleo32-boards-mb1180-stmicroelectronics.pdf
+ * https://www.st.com/resource/en/reference_manual/rm0432-stm32l4-series-advanced-armbased-32bit-mcus-stmicroelectronics.pdf
+ * 
  */
 #include <mbed.h>
 #include <stdio.h>
@@ -48,15 +50,16 @@ Thread nRF24Thread;
 
 #define ARRAY_LEN(x)            (sizeof(x) / sizeof((x)[0]))
 
-//nRF Tx and Rx Variables
-char nRF_RxData[32]; //"#000000134111154132000000"
+//nRF Vairables
+char nRF_RxData[32];
 int nRF_RxDataCnt = 0;
-char nRF_TxData[32];
-bool nRF_NewData;
+char nRF_TxData[32] = {0};
+bool nRF_NewData = false;
+bool nRF_Initialized = false;
 
 //RS485 Tx and Rx Variables
 uint8_t RS485_RxData[32] = {0};
-uint8_t RS485_TxData[32] = {0}; //"##99000000134111154132000000999"
+char RS485_TxData[32] = {0}; //"#99000000134111154132000000999#"
 size_t old_posRx;
 size_t posRx;
 bool RS485_NewData;
@@ -65,75 +68,55 @@ int main()
 {
     NVIC_SetPriorityGrouping(NVIC_PRIORITYGROUP_4);
 
-    SystemClock_Config();              
     GPIO_Init();
     USART1_UART_Init();
     SPI1_Init();
 
     USART1_DMA1_Start_Transmit();
-    //USART1_DMA1_Start_Transmit();
-    //nRF24Thread.start(nRF24);
-    while(1)
-    {
-        HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_3);
-        HAL_Delay(500);
-        /*for (int i = 0; i < 33; i++)
-        {
-            HAL_Delay(1);
-            LL_USART_TransmitData8( USART1, RS485_TxData[i]);
-        }*/
-        
-        //printf("DMA Buffer: %s\n", RS485_RxData); //DMA Buffer
-        //printf("nRF Transmitting: %s\n", nRF_TxData); //Processed Data
-        //printf("Length: %d\n", length);
+    nRF24Thread.start(nRF24);
 
-        /*uint8_t length = LL_DMA_GetDataLength(DMA1, LL_DMA_CHANNEL_5);
-        if(length==1){printf("nRF Transmitting: %s\n", nRF_TxData);}
-
-        uint8_t len2 = LL_DMA_GetDataLength(DMA1, LL_DMA_CHANNEL_4);
-        printf("DMA1 Length: %d\n", len2);*/
-    }
 }
 
 void USART1_DMA1_Start_Transmit(void)
 {
     //Start USART Transmission through DMA
     LL_DMA_DisableChannel(DMA1, LL_DMA_CHANNEL_4);
-    LL_USART_ClearFlag_TC(USART1);
-    LL_DMA_ClearFlag_TC4(DMA1);
-    // set length to be tranmitted
-    LL_DMA_SetDataLength(DMA1, LL_DMA_CHANNEL_4, ARRAY_LEN(RS485_TxData));
-    
-    // configure address to be transmitted by DMA
-    LL_DMA_ConfigAddresses(DMA1, LL_DMA_CHANNEL_4, (uint32_t)RS485_TxData, (uint32_t)LL_USART_DMA_GetRegAddr(USART1, LL_USART_DMA_REG_DATA_TRANSMIT), LL_DMA_GetDataTransferDirection(DMA1, LL_DMA_CHANNEL_4));
+
     LL_DMA_SetMemoryAddress(DMA1, LL_DMA_CHANNEL_4, (uint32_t)RS485_TxData);
 
-    // Enable DMA again
-    LL_USART_EnableDirectionTx(USART1);
+    LL_DMA_SetDataLength(DMA1, LL_DMA_CHANNEL_4, ARRAY_LEN(RS485_TxData));
+
     LL_USART_EnableDMAReq_TX(USART1);
+
+    LL_USART_EnableDirectionTx(USART1);
+
+    LL_USART_ClearFlag_TC(USART1);
+    LL_DMA_ClearFlag_TC4(DMA1);
 
     LL_DMA_EnableChannel(DMA1, LL_DMA_CHANNEL_4);
 }
 
 void USART_Rx_Check(void) 
 {
-    //Function called on every TC interrupt
+    //Function called on every TC interrupt or IDLE line interrupt
     posRx = ARRAY_LEN(RS485_RxData) - LL_DMA_GetDataLength(DMA1, LL_DMA_CHANNEL_5);
-    //See github tutorial for explanation
-    if (posRx > old_posRx) 
-    {                 
-        USART_Process_Data(&RS485_RxData[old_posRx], posRx - old_posRx);
-        old_posRx = posRx;
-    } 
-    else if (posRx < old_posRx)
+    if(posRx != old_posRx) //If new data
     {
-        USART_Process_Data(&RS485_RxData[old_posRx], ARRAY_LEN(RS485_RxData) - old_posRx);
-        old_posRx = posRx;                       
-    }
-    else if (posRx == 0)
-    {
-        //This will be the typical case: waits until a full packet is ready to be processed
-        USART_Process_Data(&RS485_RxData[0], 32);
+        if (posRx > old_posRx) 
+        {                 
+            //Check if the new position in the buffer is greater than the old (Bad timed packet)
+            USART_Process_Data(&RS485_RxData[old_posRx], posRx - old_posRx);
+        } 
+        else 
+        {
+            //Check if the new position in the buffer is less than the old (Bad packet)
+            USART_Process_Data(&RS485_RxData[old_posRx], ARRAY_LEN(RS485_RxData) - old_posRx);
+            if(posRx > 0)
+            {
+                USART_Process_Data(&RS485_RxData[0], posRx);
+            }
+                                   
+        }
         old_posRx = posRx;
     }
 }
@@ -146,50 +129,63 @@ void USART_Process_Data(uint8_t* data, size_t len)
 
 //Active Functions: (Called Often)
 void nRF24()
-{
-    /*****Transceiver Initialization*****/
-    nRF24L01P nRF(PA_7, PA_6, PA_5, PA_4, PA_1, PA_0); //mosi, miso, sck, csn, ce, irq
-    
-    nRF.powerUp();
-    nRF.setTransferSize(32);
+{   
+    nRF24L01P nRF(PA_7, PA_6, PA_5, PB_0, PA_1, PA_0); //mosi, miso, sck, csn, ce, irq
 
-    printf("nRF24L01+ Frequency     : %d MHz\r\n",  nRF.getRfFrequency());
-    printf("nRF24L01+ Output power  : %d dBm\r\n",  nRF.getRfOutputPower());
-    printf("nRF24L01+ Data Rate     : %d kbps\r\n", nRF.getAirDataRate());
-    printf("nRF24L01+ TX Address    : 0x%010llX\r\n", nRF.getTxAddress());
-    printf("nRF24L01+ RX Address    : 0x%010llX\r\n", nRF.getRxAddress());
-    printf("nRF24L01+ Transfer Size : %d\r\n", nRF.getTransferSize());
-    
-    nRF.setReceiveMode(); 
-    nRF.enable(); 
-    /***********************************/
     while(1)
     {
-        //Receive data if there is data to be received
-        if (nRF.readable())
-        {
-            nRF_RxDataCnt = nRF.read(NRF24L01P_PIPE_P0, nRF_RxData, sizeof(nRF_RxData));
-            nRF_NewData = true;
-        }
-        if (nRF_NewData == true)
-        {
-            //printf("Received: %s\n", nRF_RxData);
-            memcpy(RS485_TxData, nRF_RxData, 32); //Put nRF Rx data into RS485 Tx data
-            nRF_NewData = false;
-        }
-        if(RS485_NewData == true)
-        {
-            nRF.write(NRF24L01P_PIPE_P0, nRF_TxData, sizeof(nRF_TxData));
-        }
-    }
-}
+         /*****Transceiver Initialization*****/
+        /* Re-try nRF Initialization Steps 
+        1. Enable power to module  
+        2. Set transfer size
+        3. Check output from nRF config functions
+            If No Error
+            Module is correctly initialized, proceed to step 4
+            If Error:
+            Disable power to module, restart at step 1
+        4. Set receive mode (module will change to tx mode when transmitting)
+        5. Enable the module 
+        */
+        HAL_Delay(5000);
+        nRF.powerUp();
+        nRF.setTransferSize(32);
+        uint8_t nRF_InitCheck = 0;
+        //Check if nRF module is powered and communicating properly, will loop until no errors
+        if(nRF.getRfFrequency() < 2525 || nRF.getRfFrequency() > 2400){printf("nRF24L01+ Frequency     : %d MHz\r\n",  nRF.getRfFrequency());nRF_InitCheck++;}
+        else{nRF.disable();nRF.powerDown();nRF_Error_Handler(1);}
+        if(nRF.getRfOutputPower() != 1){printf("nRF24L01+ Output power  : %d dBm\r\n",  nRF.getRfOutputPower());nRF_InitCheck++;}
+        else{nRF.getRfOutputPower();nRF.disable();nRF.powerDown();nRF_Error_Handler(2);}
+        if(nRF.getAirDataRate() != 0){printf("nRF24L01+ Data Rate     : %d kbps\r\n", nRF.getAirDataRate());nRF_InitCheck++;}
+        else{nRF.disable();nRF.powerDown();nRF_Error_Handler(3);}
+        if(nRF.getTxAddress() != 0){printf("nRF24L01+ TX Address    : 0x%010llX\r\n", nRF.getTxAddress());nRF_InitCheck++;}
+        else{nRF.disable();nRF.powerDown();nRF_Error_Handler(4);}
+        if(nRF.getRxAddress() != 0){printf("nRF24L01+ RX Address    : 0x%010llX\r\n", nRF.getRxAddress());nRF_InitCheck++;}
+        else{nRF.disable();nRF.powerDown();nRF_Error_Handler(5);}
+        if(nRF.getTransferSize() == 32){printf("nRF24L01+ Transfer Size : %d\r\n", nRF.getTransferSize());nRF_InitCheck++;}
+        else{nRF.disable();nRF.powerDown();nRF_Error_Handler(6);}
+        if(nRF.getCrcWidth() != 0){printf("nRF24L01P+ CRC Width    :  %d\r\n", nRF.getCrcWidth());nRF_InitCheck++;}
+        else{nRF.disable();nRF.powerDown();nRF_Error_Handler(7);}
 
-void Error_Handler(void)
-{
-    //User can add his own implementation to report the HAL error return state
-    __disable_irq();
-    while (1)
-    {
+        if (nRF_InitCheck == 7)
+        {
+            nRF.setReceiveMode(); 
+            nRF.enable();
+            printf("nRF Initialized!\n"); 
+            nRF_Initialized = true;
+        }
+        while (nRF_Initialized)
+        {
+            //Receive data if there is data to be received
+            if (nRF.readable())
+            {
+                nRF_RxDataCnt = nRF.read(NRF24L01P_PIPE_P0, RS485_TxData, sizeof(RS485_TxData));
+                //memcpy(RS485_TxData, nRF_RxData, 32);
+                USART1_DMA1_Start_Transmit();
+                HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_3);
+            }
+            //memcpy(nRF_TxData, RS485_RxData, 32);
+            //nRF.write(NRF24L01P_PIPE_P1, nRF_TxData, sizeof(nRF_TxData));
+        }
     }
 }
 
@@ -204,13 +200,6 @@ static void GPIO_Init(void)
     LL_AHB2_GRP1_EnableClock(LL_AHB2_GRP1_PERIPH_GPIOA);
     LL_AHB2_GRP1_EnableClock(LL_AHB2_GRP1_PERIPH_GPIOB);
     LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_SPI1);
-
-    //Configure GPIO pins for nRF module and RS485 Module (PA_8):
-    GPIO_InitStruct.Pin = LL_GPIO_PIN_8|LL_GPIO_PIN_4|LL_GPIO_PIN_1|LL_GPIO_PIN_0;
-    GPIO_InitStruct.Mode = LL_GPIO_MODE_OUTPUT;
-    GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_LOW;
-    GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
-    LL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
     //Configure GPIO pin for onboard LED:
     GPIO_InitStruct.Pin = LL_GPIO_PIN_3;
@@ -228,34 +217,48 @@ static void GPIO_Init(void)
     GPIO_InitStruct.Alternate = LL_GPIO_AF_7;
     LL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-    //SPI1 GPIO Configuration (PA_5 = SCK, PA_6 = MISO, PA_7 = MOSI)
-    GPIO_InitStruct.Pin = LL_GPIO_PIN_5|LL_GPIO_PIN_6|LL_GPIO_PIN_7; //SCK, MISO, MOSI
+    //SPI1 GPIO Configuration 
+    GPIO_InitStruct.Pin = LL_GPIO_PIN_5|LL_GPIO_PIN_6|LL_GPIO_PIN_7; //PA_5 = SCK, PA_6 = MISO, PA_7 = MOSI
     GPIO_InitStruct.Mode = LL_GPIO_MODE_ALTERNATE;
     GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_VERY_HIGH;
     GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
     GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
-    GPIO_InitStruct.Alternate = LL_GPIO_AF_5;
+    GPIO_InitStruct.Alternate = LL_GPIO_AF_7;
+    LL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+    GPIO_InitStruct.Pin = LL_GPIO_PIN_0; //PB_0 = CSN
+    GPIO_InitStruct.Mode = LL_GPIO_MODE_OUTPUT;
+    GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_LOW;
+    GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
+    LL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+    GPIO_InitStruct.Pin = LL_GPIO_PIN_1|LL_GPIO_PIN_0; //PA_1 = CE, PA_0 = IRQ
+    GPIO_InitStruct.Mode = LL_GPIO_MODE_OUTPUT;
+    GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_LOW;
+    GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
     LL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 }
 
 static void SPI1_Init(void)
 {
-    //spi1 parameter configuration
-    hspi1.Instance = SPI1;
-    hspi1.Init.Mode = SPI_MODE_SLAVE;
-    hspi1.Init.Direction = SPI_DIRECTION_2LINES;
-    hspi1.Init.DataSize = SPI_DATASIZE_8BIT;
-    hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
-    hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
-    hspi1.Init.NSS = SPI_NSS_SOFT;
-    hspi1.Init.FirstBit = SPI_FIRSTBIT_LSB;
-    hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
-    hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
-    hspi1.Init.CRCPolynomial = 10;
-    if (HAL_SPI_Init(&hspi1) != HAL_OK)
-    {
-        Error_Handler();
-    }
+    LL_SPI_InitTypeDef SPI_InitStruct = {0};
+
+    LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_SPI1);
+    LL_AHB2_GRP1_EnableClock(LL_AHB2_GRP1_PERIPH_GPIOA);
+    LL_AHB2_GRP1_EnableClock(LL_AHB2_GRP1_PERIPH_GPIOB);
+
+    SPI_InitStruct.Mode = LL_SPI_MODE_MASTER;
+    SPI_InitStruct.TransferDirection = LL_SPI_FULL_DUPLEX;
+    SPI_InitStruct.DataWidth = LL_SPI_DATAWIDTH_8BIT;
+    SPI_InitStruct.ClockPolarity = LL_SPI_POLARITY_LOW;
+    SPI_InitStruct.ClockPhase = LL_SPI_PHASE_1EDGE;
+    SPI_InitStruct.NSS = LL_SPI_NSS_SOFT;
+    SPI_InitStruct.BitOrder = LL_SPI_LSB_FIRST;
+    SPI_InitStruct.BaudRate = LL_RCC_APB2_DIV_4;
+    SPI_InitStruct.CRCCalculation = LL_SPI_CRCCALCULATION_DISABLE;
+    SPI_InitStruct.CRCPoly = 10;
+
+    LL_SPI_Init(SPI1, &SPI_InitStruct);
 }
 
 static void USART1_UART_Init(void)
@@ -305,7 +308,7 @@ static void USART1_UART_Init(void)
     LL_DMA_EnableIT_TC(DMA1, LL_DMA_CHANNEL_4);
 
     /* DMA interrupt init */
-    NVIC_SetPriority(DMA1_Channel4_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 0, 1));
+    NVIC_SetPriority(DMA1_Channel4_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 0, 0));
     NVIC_EnableIRQ(DMA1_Channel4_IRQn);
 
     /* USART configuration */
@@ -322,13 +325,8 @@ static void USART1_UART_Init(void)
     //LL_USART_EnableDMAReq_TX(USART1);
     LL_USART_EnableIT_IDLE(USART1);
 
-    //USART interrupt
-    NVIC_SetPriority(USART1_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 0, 0));
-    NVIC_EnableIRQ(USART1_IRQn);
-
     // Enable USART and DMA 
     LL_DMA_EnableChannel(DMA1, LL_DMA_CHANNEL_5); //Enable DMA Channel for Rx
-    //LL_DMA_EnableChannel(DMA1, LL_DMA_CHANNEL_4); //Enable DMA Channel for Tx
     LL_USART_Enable(USART1);
 }
 
@@ -350,52 +348,41 @@ void DMA1_Channel4_IRQHandler(void)
     if (LL_DMA_IsEnabledIT_TC(DMA1, LL_DMA_CHANNEL_4) && LL_DMA_IsActiveFlag_TC4(DMA1)) 
     {
         LL_DMA_ClearFlag_TC4(DMA1);    // Clear transfer complete flag
-        USART1_DMA1_Start_Transmit();
+        //USART1_DMA1_Start_Transmit();
     }
 }
 
-
-void USART1_IRQHandler(void) 
+void nRF_Error_Handler(uint8_t value)
 {
-    // Check for IDLE line interrupt
-    if (LL_USART_IsEnabledIT_IDLE(USART1) && LL_USART_IsActiveFlag_IDLE(USART1)) {
-        LL_USART_ClearFlag_IDLE(USART1);        // Clear IDLE line flag 
-        USART_Rx_Check();                       // Check for data to process 
+    switch (value)
+    {
+        case 1:
+        //RF Frequency Error
+            printf("nRF24L01P: Unknown RF Frequency value.\n");
+            break;
+        case 2:
+        //RF Output Power Error
+            printf("nRF24L01P: Unknown RF Output Power value.\n");
+            break;
+        case 3:
+        //Air Data Rate Error
+            printf("nRF24L01P: Unknown Air Data Rate value.\n");
+            break;
+        case 4:
+        //Transmit Address Error
+            printf("nRF24L01P: Unknown Transmit Address value.\n");
+            break;
+        case 5:
+        //Receive Address Error
+            printf("nRF24L01P: Unknown Receive Address value.\n");
+            break;
+        case 6:
+        //Transfer Size Error
+            printf("nRF24L01P: Unknown Transfer Size value.\n");
+            break;
+        case 7:
+        //CRC Size Error 
+            printf("nRF24L01P: Unknown CRC Width value.\n");
+            break;
     }
-
-    //Implement other events when needed
-}
-
-void SystemClock_Config(void)
-{
-    /* Configure flash latency */
-    LL_FLASH_SetLatency(LL_FLASH_LATENCY_4);
-    if (LL_FLASH_GetLatency() != LL_FLASH_LATENCY_4) {
-        while (1) {}
-    }
-
-    /* Configure voltage scaling */
-    LL_PWR_SetRegulVoltageScaling(LL_PWR_REGU_VOLTAGE_SCALE1);
-
-    /* Configure MSI */
-    LL_RCC_MSI_Enable();
-    while (LL_RCC_MSI_IsReady() != 1) {}
-    LL_RCC_MSI_EnableRangeSelection();
-    LL_RCC_MSI_SetRange(LL_RCC_MSIRANGE_11);
-    LL_RCC_MSI_SetCalibTrimming(0);
-
-    /* Configure system clock */
-    LL_RCC_SetSysClkSource(LL_RCC_SYS_CLKSOURCE_MSI);
-    while (LL_RCC_GetSysClkSource() != LL_RCC_SYS_CLKSOURCE_STATUS_MSI) {}
-    
-    /* Configure prescalers */
-    LL_RCC_SetAHBPrescaler(LL_RCC_SYSCLK_DIV_1);
-    LL_RCC_SetAPB1Prescaler(LL_RCC_APB1_DIV_1);
-    LL_RCC_SetAPB2Prescaler(LL_RCC_APB2_DIV_1);
-
-    /* Configure systick */
-    LL_Init1msTick(48000000);
-    LL_SYSTICK_SetClkSource(LL_SYSTICK_CLKSOURCE_HCLK);
-    LL_SetSystemCoreClock(48000000);
-    LL_RCC_SetUSARTClockSource(LL_RCC_USART1_CLKSOURCE_PCLK2);
 }
